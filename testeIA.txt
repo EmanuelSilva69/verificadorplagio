@@ -1,0 +1,14 @@
+INTRODUÇÃO
+A inteligência artificial generativa representa um marco fundamental na evolução da tecnologia contemporânea. Ademais, é importante notar que a integração desses sistemas em ambientes acadêmicos oferece potencialidades significativas para a mediação informacional. Por outro lado, surgem desafios éticos relacionados à originalidade da produção textual.
+
+DESENVOLVIMENTO
+Em primeiro lugar, os modelos de linguagem de grande escala utilizam redes neurais profundas para prever a próxima palavra em uma sequência. Consequentemente, o texto resultante apresenta uma fluidez notável, embora possa carecer de profundidade crítica em certos contextos. Além disso, a uniformidade das sentenças é uma característica intrínseca à arquitetura desses algoritmos.
+
+Em segundo lugar, a implementação de chatbots em bibliotecas universitárias pode otimizar o atendimento ao usuário. Portanto, a automação de consultas rotineiras permite que os bibliotecários foquem em tarefas de maior complexidade analítica. É imperativo destacar que a precisão das respostas depende diretamente da qualidade dos dados de treinamento utilizados.
+
+CONCLUSÃO
+Em suma, o uso de ferramentas conversacionais no âmbito educacional é uma tendência irreversível. Entretanto, a vigilância constante sobre a integridade acadêmica permanece sendo uma prioridade das instituições. Em última análise, a colaboração entre humanos e máquinas deve ser pautada pela transparência e pela ética informacional.
+
+REFERÊNCIAS
+SILVA, Emanuel. O impacto dos Chatbots na UFMA. São Luís: Editora Acadêmica, 2026.
+OPENAI. Relatório Técnico sobre GPT-4. San Francisco: Tecnopress, 2023.

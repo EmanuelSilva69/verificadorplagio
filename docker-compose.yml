@@ -1,0 +1,43 @@
+services:
+  forensic-app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: forensic-plagiarism-app
+    ports:
+      - "8501:8501"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_PRIMARY_MODEL: llama3.1:8b
+      OLLAMA_SECONDARY_MODEL: qwen2.5:latest
+      SEARCH_API_PROVIDER: ${SEARCH_API_PROVIDER:-searxng}
+      SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+      SEARCH_SEARXNG_URL: ${SEARCH_SEARXNG_URL:-http://host.docker.internal:8080}
+    depends_on:
+      - ollama
+      - searxng
+    volumes:
+      - ./app:/app
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: forensic-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: forensic-searxng
+    ports:
+      - "8080:8080"
+    environment:
+      - BASE_URL=http://localhost:8080/
+      - INSTANCE_NAME=forensic-searxng
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
