@@ -1,57 +1,80 @@
-# Projeto de Analise Forense de Documentos
+# Projeto de Análise Forense de Documentos
 
-Aplicacao Streamlit para analise local de:
-- Similaridade textual (plagio)
-- Indicios de texto gerado por IA
-- Validacao de referencias com APIs publicas e LLM local via Ollama
+Aplicação Streamlit para análise local de documentos com foco em:
+- similaridade textual e indícios de plágio;
+- sinais de texto gerado por IA;
+- validação de referências com APIs públicas e Ollama local.
 
-## Estrutura
+## Como baixar e executar com Docker
 
-- app/main.py: UI Streamlit (duas colunas)
-- app/document_loader.py: leitura de PDF/DOCX/TXT e limpeza por paragrafos
-- app/analysis_engine.py: plagio + heuristicas de IA
-- app/reference_checker.py: extracao e validacao de referencias
-- app/Dockerfile: imagem da aplicacao
-- docker-compose.yml: app + servico Ollama
+1. Clone o repositório.
+2. Na raiz do projeto, suba os containers:
 
-## Como executar
+```bash
+docker compose up --build -d
+```
 
-1. Na raiz do projeto, subir os containers:
-   docker compose up --build -d
+3. Acesse a interface em:
 
-2. Baixar um modelo no Ollama (apenas na primeira vez):
-   docker exec -it forensic-ollama ollama pull llama3.1:8b
-   docker exec -it forensic-ollama ollama pull qwen2.5:latest
+```text
+http://localhost:8501
+```
 
-3. Acessar a interface:
-   http://localhost:8501
+4. Na primeira execução, baixe os modelos do Ollama:
 
-## Observacoes
+```bash
+docker exec -it forensic-ollama ollama pull llama3.1:8b
+docker exec -it forensic-ollama ollama pull qwen2.5:latest
+```
 
-- O modulo de plagio executa busca profunda e scraping de resultados web usando provider configuravel (`searxng`, `serper` ou `tavily`).
-- A validacao de referencias usa Crossref, Google Books e, quando disponivel, um LLM local no Ollama.
-- O parecer de LLM e feito em conjunto por dois modelos (Llama 3.1 8B + Qwen 2.5), com consolidacao de consenso no relatorio.
-- As marcacoes de texto seguem:
-  - Amarelo: IA Provavel
-  - Vermelho: Plagio Detectado
-  - Azul: Referencia Duvidosa
+Se quiser acompanhar os logs:
 
-## Configuracao de chaves (opcional)
+```bash
+docker compose logs -f
+```
 
-No arquivo `.env` voce pode informar parametros para busca profunda:
+## O que o app faz
+
+- Detecta trechos com risco de plágio usando busca web e comparação de similaridade.
+- Faz análise de IA com dois modelos locais no Ollama, usando consenso entre Qwen e Llama.
+- Gera métricas visuais com distribuição geral, radar de IA, barras por parágrafo e heatmap de similaridade.
+- Exibe evidências por parágrafo com marcações coloridas e veredito combinado dos modelos.
+- Faz auditoria de referências e sinaliza citações duvidosas.
+- Permite baixar um CSV com a triagem heurística.
+
+## Funcionalidades atuais
+
+- Triagem heurística rápida por regex para reduzir falsos positivos e acelerar a análise.
+- Scraper híbrido com `aiohttp` + `BeautifulSoup` e fallback para Selenium.
+- Busca web configurável por provider.
+- Consenso de IA com Qwen 2.5 e Llama 3.1.
+- Interface preparada para uso em container, sem depender de volume bind no runtime.
+
+## Configuração opcional com `.env`
+
+O Docker já sobe com valores padrão, mas você pode criar um `.env` local para sobrescrever opções de busca:
 
 - `SEARCH_API_PROVIDER=searxng|serper|tavily`
-- `SEARCH_API_KEY` (obrigatorio para `serper` e `tavily`)
-- `SEARCH_SEARXNG_URL` (obrigatorio para `searxng`)
+- `SEARCH_API_KEY` para `serper` e `tavily`
+- `SEARCH_SEARXNG_URL` se quiser apontar para uma instância diferente
 
-Sem provider configurado, o sistema usa fallback do DuckDuckGo.
+O arquivo `.env` não deve ser enviado para o GitHub. Se quiser documentar os campos, use um `.env.example`.
 
-## Teste de integracao
+## Estrutura principal
 
-Para validar busca web e resposta dos dois modelos no Ollama:
+- `app/main.py`: interface Streamlit e visualizações
+- `app/analysis_engine.py`: motor de análise de plágio e IA
+- `app/reference_checker.py`: validação e auditoria de referências
+- `app/web_scraper.py`: captura de conteúdo web com fallback
+- `app/Dockerfile`: imagem da aplicação
+- `docker-compose.yml`: orquestra app, Ollama e SearXNG
 
-1. Ajuste `.env` com provider/chaves de busca e modelos Ollama.
-2. Rode o script:
-   python test_integration.py
+## Teste de integração
 
-Se tudo estiver correto, o script retorna status `OK` para Busca Web e Ollama Qwen+Llama.
+Para validar a integração com busca web e Ollama:
+
+```bash
+python test_integration.py
+```
+
+Se tudo estiver correto, o script retorna `OK` para busca web e para os modelos Qwen + Llama.
