@@ -17,6 +17,7 @@ from document_loader import load_document
 COLOR_MAP = {
     "critical_plagiarism": "#ff6b6b",
     "suspected_ai": "#ffe066",
+    "formatting_alert": "#ffd8a8",
     "inconsistent": "#ffb347",
     "reference": "#8ec5ff",
     "safe": "#90d7a1",
@@ -25,12 +26,13 @@ COLOR_MAP = {
 LABEL_META = {
     "critical_plagiarism": "Plágio Direto detectado via busca Web (Similaridade > 55%).",
     "suspected_ai": "Consenso de IA (Qwen e Llama marcam como provável IA).",
+    "formatting_alert": "Alerta de Formatação: heurística rápida identificou artefatos típicos de LLM.",
     "inconsistent": "Divergência entre modelos (um IA e outro humano).",
     "reference": "Citação bibliográfica não encontrada ou potencial alucinação.",
     "safe": "Trecho classificado como original/humano por ambos os modelos.",
 }
 
-PRIORITY_ORDER = ["critical_plagiarism", "suspected_ai", "inconsistent", "reference", "safe"]
+PRIORITY_ORDER = ["critical_plagiarism", "suspected_ai", "formatting_alert", "inconsistent", "reference", "safe"]
 
 
 def _badge_html(label_key: str) -> str:
@@ -61,6 +63,11 @@ def _build_alert_labels(analysis: Dict[str, object], total_paragraphs: int) -> D
             labels[idx].append("inconsistent")
         elif qwen <= 0.40 and llama <= 0.40:
             labels[idx].append("safe")
+
+    for row in analysis.get("fast_heuristic_hits", []):
+        idx = int(row.get("paragraph_index", -1))
+        if 0 <= idx < total_paragraphs:
+            labels[idx].append("formatting_alert")
 
     for ref in analysis.get("reference_checks", []):
         idx = int(ref.get("paragraph_index", -1))
@@ -280,12 +287,52 @@ def _build_side_by_side_table(analysis: Dict[str, object]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _build_heuristic_export_df(analysis: Dict[str, object]) -> pd.DataFrame:
+    rows: List[Dict[str, object]] = []
+    for row in analysis.get("fast_heuristic_rows", []):
+        rows.append(
+            {
+                "paragraph_index": int(row.get("paragraph_index", -1)) + 1,
+                "heuristic_score": int(row.get("heuristic_score", 0)),
+                "is_suspicious": bool(row.get("is_suspicious", False)),
+                "critical_triggered": bool(row.get("critical_triggered", False)),
+                "total_hits": int(row.get("total_hits", 0)),
+                "density_per_100_words": float(row.get("density_per_100_words", 0.0)),
+                "evidence": " | ".join(str(item) for item in row.get("evidence", [])),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _render_report_details(
     analysis: Dict[str, object],
     alert_labels_by_paragraph: Dict[int, List[str]],
 ) -> None:
     st.metric("Similaridade media (plagio web)", f"{analysis['plagiarism_percentage']:.2f}%")
     st.metric("Probabilidade heuristica de IA", f"{analysis['ai_probability']:.2f}%")
+
+    heuristic_hits = analysis.get("fast_heuristic_hits", [])
+    st.caption(
+        f"Triagem rápida: {len(heuristic_hits)} parágrafo(s) com alerta de formatação por regex."
+    )
+
+    if heuristic_hits:
+        with st.expander("Evidências da triagem heurística", expanded=False):
+            for row in heuristic_hits:
+                paragraph_number = int(row.get("paragraph_index", -1)) + 1
+                score = int(row.get("heuristic_score", 0))
+                st.markdown(f"- Parágrafo {paragraph_number} | Score heurístico: {score}")
+                for item in row.get("evidence", []):
+                    st.caption(f"• {item}")
+
+    export_df = _build_heuristic_export_df(analysis)
+    if not export_df.empty:
+        st.download_button(
+            label="Baixar CSV da triagem heurística",
+            data=export_df.to_csv(index=False),
+            file_name="triagem_heuristica.csv",
+            mime="text/csv",
+        )
 
     stats = analysis.get("search_stats", {})
     st.caption(
@@ -340,22 +387,67 @@ def _render_report_details(
             )
             st.caption(f"Confianca: {llm.get('confidence', 'Inconsistente')}")
 
-    st.markdown("### Depuracao de Veredito (Qwen Raw Response)")
+def _render_llm_verdict_tab(analysis: Dict[str, object]) -> None:
+    deep_enabled = bool(analysis.get("deep_ai_enabled", False))
+    if not deep_enabled:
+        st.warning("Análise profunda desativada pelo usuário.")
+        return
+
+    st.markdown("### Veredito Qwen/Llama por Parágrafo")
     ai_rows = analysis.get("ai_llm_scores", [])
     if not ai_rows:
-        st.write("Sem dados de depuracao de IA para exibir.")
-    else:
-        for row in ai_rows:
-            qwen_raw_response = row.get("qwen_raw_response", "")
-            if qwen_raw_response:
-                st.markdown(f"- Paragrafo {int(row.get('paragraph_index', 0)) + 1}:")
-                st.write(qwen_raw_response)
+        st.info("Sem dados de veredito para exibir.")
+        return
+
+    for row in ai_rows:
+        paragraph_number = int(row.get("paragraph_index", 0)) + 1
+        st.markdown(f"- Parágrafo {paragraph_number}")
+        st.caption(
+            f"Qwen={float(row.get('qwen_probability', 0.0)):.2f} | "
+            f"Llama={float(row.get('llama_probability', 0.0)):.2f} | "
+            f"Consenso={float(row.get('consensus_probability', 0.0)):.2f}"
+        )
+
+        qwen_raw_response = str(row.get("qwen_raw_response", "")).strip()
+        llama_raw_response = str(row.get("llama_raw_response", "")).strip()
+        if qwen_raw_response:
+            st.write(f"Qwen: {qwen_raw_response}")
+        if llama_raw_response:
+            st.write(f"Llama: {llama_raw_response}")
+
+
+def _render_reference_card(row: Dict[str, object], title: str) -> None:
+    reference = str(row.get("reference", ""))
+    found_google = str(row.get("found_google", "Nao"))
+    status_web = str(row.get("status_web", row.get("pipeline_status", "inconclusivo")))
+    veredito_final = str(row.get("veredito_final", "inconclusivo"))
+    top_source = str(row.get("top_source", ""))
+    qwen = row.get("llm_consensus", {}).get("qwen", {}) if isinstance(row.get("llm_consensus", {}), dict) else {}
+    llama = row.get("llm_consensus", {}).get("llama", {}) if isinstance(row.get("llm_consensus", {}), dict) else {}
+
+    st.markdown(
+        f"<div style='padding:12px;border:1px solid #d9d9d9;border-radius:10px;margin-bottom:10px;background:#fafafa;'>"
+        f"<div style='font-weight:700;margin-bottom:6px;'>{title}</div>"
+        f"<div style='margin-bottom:8px;'><strong>Referência:</strong> {html.escape(reference)}</div>"
+        f"<div><strong>Web:</strong> {html.escape(status_web)} | <strong>Google:</strong> {html.escape(found_google)} | <strong>Fonte:</strong> {html.escape(top_source)}</div>"
+        f"<div><strong>Qwen:</strong> {html.escape(str(qwen.get('veredito', qwen.get('error', 'n/a'))))} | {html.escape(str(qwen.get('justificativa', '')))}</div>"
+        f"<div><strong>Llama:</strong> {html.escape(str(llama.get('veredito', llama.get('error', 'n/a'))))} | {html.escape(str(llama.get('justificativa', '')))}</div>"
+        f"<div><strong>Veredito Final:</strong> {html.escape(veredito_final)}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def main() -> None:
     st.set_page_config(page_title="Forense de Plagio e IA", layout="wide")
     st.title("Analise Forense de Documentos")
     st.write("Upload de PDF/DOCX/TXT para detectar plagio web, IA e referencias duvidosas.")
+
+    enable_deep_ai = st.toggle(
+        "Habilitar Análise Profunda com IA (Llama/Qwen)",
+        value=False,
+        help="A análise profunda consome mais tempo e hardware. Use a análise rápida para uma triagem inicial.",
+    )
 
     uploaded_file = st.file_uploader("Selecione um arquivo", type=["pdf", "docx", "doc", "txt"])
     if not uploaded_file:
@@ -372,9 +464,19 @@ def main() -> None:
         st.warning("Nenhum texto util encontrado no documento.")
         return
 
-    if not st.button("Executar analise forense", type="primary"):
+    action_col1, action_col2 = st.columns(2)
+    with action_col1:
+        run_forensic = st.button("Executar analise forense", type="primary")
+    with action_col2:
+        run_aux_ai = st.button("Rodar analise auxiliar IA (Qwen + Llama 8.1)")
+
+    if not run_forensic and not run_aux_ai:
         st.text_area("Texto extraido (pre-visualizacao)", unified_text, height=360)
         return
+
+    deep_ai_for_run = enable_deep_ai or run_aux_ai
+    if run_aux_ai and not enable_deep_ai:
+        st.info("Análise auxiliar de IA acionada manualmente para esta execução.")
 
     progress_widget = st.progress(0, text="Preparando execucao...")
     debug_logs: List[str] = []
@@ -401,6 +503,19 @@ def main() -> None:
                 f"🤖 [Modelo {model_pos}/2] {model_name} analisando {section}: [{bar}] {pct}%"
             )
 
+        def _reference_progress_callback(done: int, total: int, phase: str) -> None:
+            pct = int((done / max(1, total)) * 100)
+            blocks = int(pct / 10)
+            bar = "█" * blocks + "░" * (10 - blocks)
+            phase_label = {
+                "web": "Busca Web",
+                "qwen": "Qwen (Bibliotecário)",
+                "llama": "Llama (Contra-parecer)",
+            }.get(phase, phase)
+            _set_status_label(
+                f"📚 Auditoria de Referências [{phase_label}]: [{bar}] {done}/{total}"
+            )
+
         def _debug_callback(message: str) -> None:
             debug_logs.append(message)
 
@@ -408,8 +523,13 @@ def main() -> None:
         setattr(_status_callback, "progress_callback", _progress_callback)
         setattr(_status_callback, "model_progress_callback", _model_progress_callback)
         setattr(_status_callback, "debug_callback", _debug_callback)
+        setattr(_status_callback, "reference_progress_callback", _reference_progress_callback)
 
-        analysis = analyze_document(paragraphs, status_callback=_status_callback)
+        analysis = analyze_document(
+            paragraphs,
+            status_callback=_status_callback,
+            enable_deep_ai=deep_ai_for_run,
+        )
         _progress_callback(1.0)
         runtime_status.update(label="Analise Forense Concluida", state="complete")
 
@@ -430,8 +550,8 @@ def main() -> None:
         st.text_area("Conteudo", unified_text, height=680)
 
     with col_right:
-        tab_analise, tab_comparativo, tab_auditoria = st.tabs(
-            ["Relatorio de Analise", "Relatorio Comparativo", "🔍 Auditoria de Referências"]
+        tab_analise, tab_comparativo, tab_veredito, tab_auditoria = st.tabs(
+            ["Relatorio de Analise", "Relatorio Comparativo", "Veredito Qwen/Llama", "🔍 Auditoria de Referências"]
         )
 
         with tab_analise:
@@ -454,6 +574,9 @@ def main() -> None:
             _render_stacked_ai_bars(analysis)
             _render_similarity_heatmap(analysis)
 
+        with tab_veredito:
+            _render_llm_verdict_tab(analysis)
+
         with tab_auditoria:
             st.markdown("### Protocolo de Verificacao Unitaria")
 
@@ -465,30 +588,12 @@ def main() -> None:
 
                 if preliminary and not audit_results:
                     st.info("Auditando referencias em segundo plano...")
-                    table_rows = [
-                        {
-                            "Obra Citada": row.get("reference", ""),
-                            "Encontrada no Google?": row.get("found_google", "Auditando..."),
-                            "Veredito Final": row.get("veredito_final", "Auditando..."),
-                            "DOI": row.get("doi", "Auditando..."),
-                            "Pipeline": row.get("pipeline_status", "auditando"),
-                        }
-                        for row in preliminary
-                    ]
-                    st.dataframe(table_rows, use_container_width=True)
+                    for idx, row in enumerate(preliminary):
+                        _render_reference_card(row, f"Obra {idx + 1} (auditando)")
 
                 if audit_results:
-                    table_rows = [
-                        {
-                            "Obra Citada": row.get("reference", ""),
-                            "Encontrada no Google?": row.get("found_google", "Nao"),
-                            "Veredito Final": row.get("veredito_final", "inconclusivo"),
-                            "DOI": row.get("doi", "Nao encontrado"),
-                            "Pipeline": row.get("pipeline_status", "concluido"),
-                        }
-                        for row in audit_results
-                    ]
-                    st.dataframe(table_rows, use_container_width=True)
+                    for idx, row in enumerate(audit_results):
+                        _render_reference_card(row, f"Obra {idx + 1}")
                 else:
                     st.write("Auditoria integrada ao pipeline principal. Aguarde a conclusao da analise.")
 

@@ -98,6 +98,67 @@ def format_raw_text(text: str) -> str:
     return normalized.strip()
 
 
+def split_academic_references(text_block: str) -> List[str]:
+    """Separa referencias academicas aglutinadas em itens individuais.
+
+    Regras de quebra:
+    - Padrão ABNT: inicio de linha com SOBRENOME em caixa alta.
+    - Padrão Numérico: inicio de linha com [1], [2], ...
+    - Padrão Nome/Ano: inicio de linha com "Autor, 2024".
+    - Se nao houver quebras de linha, força quebra em ". SOBRENOME, X".
+    """
+    if not text_block:
+        return []
+
+    normalized = unicodedata.normalize("NFKC", text_block)
+    normalized = re.sub(r"[ \t]+", " ", normalized).strip()
+
+    # Caso OCR/PDF tenha colado tudo sem \n, forca quebras em inicio de nova obra.
+    if "\n" not in normalized:
+        normalized = re.sub(
+            r"\.\s+(?=[A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ]{3,}(?:\s+[A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ]{2,})*,\s*[A-Z])",
+            ".\n",
+            normalized,
+            flags=re.UNICODE,
+        )
+        normalized = re.sub(r"\s*(?=\[\d+\])", "\n", normalized, flags=re.UNICODE)
+        normalized = re.sub(r"\s*(?=[A-Z][a-z]+,\s\d{4})", "\n", normalized, flags=re.UNICODE)
+
+    split_pattern = (
+        r"\n(?=[A-Z]{3,},)"
+        r"|\n(?=\[\d+\])"
+        r"|\n(?=[A-Z][a-z]+,\s\d{4})"
+    )
+
+    parts = re.split(split_pattern, normalized, flags=re.UNICODE)
+    cleaned: List[str] = []
+    for part in parts:
+        item = re.sub(r"\s+", " ", part, flags=re.UNICODE).strip(" ;")
+        if len(item) > 10:
+            cleaned.append(item)
+
+    # Ceticismo de formatação: itens muito longos podem conter mais de uma obra colada.
+    final_items: List[str] = []
+    for item in cleaned:
+        if len(item) <= 500:
+            final_items.append(item)
+            continue
+
+        resplit = re.split(
+            r"(?=(?:[A-Z]{3,}(?:\s+[A-Z]{2,})*,\s*[A-Z]))",
+            item,
+            flags=re.UNICODE,
+        )
+        resplit_clean = [re.sub(r"\s+", " ", x, flags=re.UNICODE).strip(" ;") for x in resplit]
+        resplit_clean = [x for x in resplit_clean if len(x) > 10]
+        if len(resplit_clean) > 1:
+            final_items.extend(resplit_clean)
+        else:
+            final_items.append(item)
+
+    return final_items
+
+
 def build_structured_prompt(instruction: str, sections: Dict[str, str]) -> str:
     """Monta prompt em blocos bem separados para reduzir ambiguidades nos LLMs."""
     parts = [

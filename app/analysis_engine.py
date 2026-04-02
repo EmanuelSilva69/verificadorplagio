@@ -10,6 +10,7 @@ import json
 import os
 import re
 import statistics
+import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +78,7 @@ StatusCallback = Optional[Callable[[str], None]]
 ProgressCallback = Optional[Callable[[float], None]]
 ModelProgressCallback = Optional[Callable[[int, str, int, int, str], None]]
 DebugCallback = Optional[Callable[[str], None]]
+ReferenceProgressCallback = Optional[Callable[[int, int, str], None]]
 
 
 @dataclass
@@ -100,6 +102,100 @@ class PlagiarismHit:
     classification: str
     llm_consensus: Dict[str, object]
     supporting_matches: List[Dict[str, object]]
+
+
+@dataclass(frozen=True)
+class HeuristicRule:
+    name: str
+    category: str
+    weight: int
+    pattern: re.Pattern[str]
+
+
+REGEX_FAST_FLAGS = re.IGNORECASE | re.UNICODE | re.MULTILINE
+
+CRITICAL_META_RULES: Tuple[HeuristicRule, ...] = (
+    HeuristicRule(
+        name="Meta: modelo de linguagem",
+        category="critical_meta",
+        weight=100,
+        pattern=re.compile(r"\bcomo\s+um\s+modelo\s+de\s+linguagem\b|\bcomo\s+uma\s+intelig[êe]ncia\s+artificial\b", REGEX_FAST_FLAGS),
+    ),
+    HeuristicRule(
+        name="Meta: entrega pronta",
+        category="critical_meta",
+        weight=100,
+        pattern=re.compile(r"\bclaro!?\s*aqui\s+est[áa]\s+(?:o|a)\b|\baqui\s+est[áa]\s+o\s+resumo\s+solicitado\b", REGEX_FAST_FLAGS),
+    ),
+    HeuristicRule(
+        name="Meta: recusa/limitação",
+        category="critical_meta",
+        weight=100,
+        pattern=re.compile(r"\blamento,?\s+mas\s+n[ãa]o\s+posso\b|\bn[ãa]o\s+tenho\s+acesso\s+a\s+dados\s+em\s+tempo\s+real\b", REGEX_FAST_FLAGS),
+    ),
+    HeuristicRule(
+        name="Meta: encerramento assistente",
+        category="critical_meta",
+        weight=100,
+        pattern=re.compile(r"\bespero\s+que\s+isso\s+ajude\b|\bse\s+precisar\s+de\s+mais\s+alguma\s+coisa\b", REGEX_FAST_FLAGS),
+    ),
+)
+
+MARKDOWN_LATEX_RULES: Tuple[HeuristicRule, ...] = (
+    HeuristicRule("Markdown: negrito", "markdown_latex", 30, re.compile(r"\*\*[^*\n]{2,}\*\*", REGEX_FAST_FLAGS)),
+    HeuristicRule("Markdown: itálico", "markdown_latex", 30, re.compile(r"(?<!\*)\*[^*\n]{2,}\*(?!\*)", REGEX_FAST_FLAGS)),
+    HeuristicRule("Markdown: título", "markdown_latex", 30, re.compile(r"(?m)^\s*#{2,3}\s+", REGEX_FAST_FLAGS)),
+    HeuristicRule("Markdown: lista com traço", "markdown_latex", 30, re.compile(r"(?m)^\s*-\s+", REGEX_FAST_FLAGS)),
+    HeuristicRule("Markdown: lista com asterisco", "markdown_latex", 30, re.compile(r"(?m)^\s*\*\s+", REGEX_FAST_FLAGS)),
+    HeuristicRule("Markdown: crases triplas", "markdown_latex", 30, re.compile(r"```", REGEX_FAST_FLAGS)),
+    HeuristicRule("LaTeX: resíduos", "markdown_latex", 30, re.compile(r"\\textbf\{[^}]*\}|\\begin\{itemize\}|\\item\b|\\\[|\\\]", REGEX_FAST_FLAGS)),
+    HeuristicRule("Markdown: linha horizontal", "markdown_latex", 30, re.compile(r"(?m)^\s*---+\s*$", REGEX_FAST_FLAGS)),
+    HeuristicRule("Aspas duplas aninhadas", "markdown_latex", 30, re.compile(r'""[^"\n]{2,}""', REGEX_FAST_FLAGS)),
+)
+
+ROBOTIC_CONNECTOR_RULES: Tuple[HeuristicRule, ...] = (
+    HeuristicRule("Conectivo: Ademais", "robotic_connectors", 15, re.compile(r"\bademais\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Em suma", "robotic_connectors", 15, re.compile(r"\bem\s+suma\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Em conclusão", "robotic_connectors", 15, re.compile(r"\bem\s+conclus[ãa]o\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Por outro lado", "robotic_connectors", 15, re.compile(r"\bpor\s+outro\s+lado\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: É importante notar", "robotic_connectors", 15, re.compile(r"\b[ée]\s+importante\s+notar\s+que\b|\b[ée]\s+importante\s+notar\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Vale ressaltar", "robotic_connectors", 15, re.compile(r"\bvale\s+ressaltar\s+que\b|\bvale\s+ressaltar\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Neste contexto", "robotic_connectors", 15, re.compile(r"\bneste\s+contexto\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Nesse sentido", "robotic_connectors", 15, re.compile(r"\bnesse\s+sentido\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Em primeiro lugar", "robotic_connectors", 15, re.compile(r"\bem\s+primeiro\s+lugar\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Em segundo lugar", "robotic_connectors", 15, re.compile(r"\bem\s+segundo\s+lugar\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Consequentemente", "robotic_connectors", 15, re.compile(r"\bconsequentemente\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Portanto", "robotic_connectors", 15, re.compile(r"\bportanto\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Conectivo: Em resumo", "robotic_connectors", 15, re.compile(r"\bem\s+resumo\b", REGEX_FAST_FLAGS)),
+)
+
+STEREOTYPED_VOCAB_RULES: Tuple[HeuristicRule, ...] = (
+    HeuristicRule("Vocabulário: crucial", "stereotyped_vocab", 5, re.compile(r"\bcrucial\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: fundamental", "stereotyped_vocab", 5, re.compile(r"\bfundamental\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: tapeçaria", "stereotyped_vocab", 5, re.compile(r"\btape[çc]aria\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: mergulhar", "stereotyped_vocab", 5, re.compile(r"\bmergulhar\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: navegar", "stereotyped_vocab", 5, re.compile(r"\bnavegar\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: desbloquear", "stereotyped_vocab", 5, re.compile(r"\bdesbloquear\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: paisagem", "stereotyped_vocab", 5, re.compile(r"\bpaisagem\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: multifacetado", "stereotyped_vocab", 5, re.compile(r"\bmultifacetad[oa]\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: robusto", "stereotyped_vocab", 5, re.compile(r"\brobust[oa]\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: catalisador", "stereotyped_vocab", 5, re.compile(r"\bcatalisador\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: paradigma", "stereotyped_vocab", 5, re.compile(r"\bparadigma\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: abraçar", "stereotyped_vocab", 5, re.compile(r"\babra[çc]ar\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: tapeçaria rica", "stereotyped_vocab", 5, re.compile(r"\btape[çc]aria\s+rica\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: mergulhar neste", "stereotyped_vocab", 5, re.compile(r"\bmergulhar\s+neste\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: desbloquear o potencial", "stereotyped_vocab", 5, re.compile(r"\bdesbloquear\s+o\s+potencial\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: paisagem tecnológica", "stereotyped_vocab", 5, re.compile(r"\bpaisagem\s+tecnol[óo]gica\b", REGEX_FAST_FLAGS)),
+    HeuristicRule("Vocabulário: abordagem multifacetada", "stereotyped_vocab", 5, re.compile(r"\babordagem\s+multifacetada\b", REGEX_FAST_FLAGS)),
+)
+
+ALL_WEIGHTED_HEURISTIC_RULES: Tuple[HeuristicRule, ...] = (
+    MARKDOWN_LATEX_RULES + ROBOTIC_CONNECTOR_RULES + STEREOTYPED_VOCAB_RULES
+)
+
+NON_VOCAB_WEIGHTED_HEURISTIC_RULES: Tuple[HeuristicRule, ...] = (
+    MARKDOWN_LATEX_RULES + ROBOTIC_CONNECTOR_RULES
+)
 
 
 def _paragraph_hash(text: str) -> str:
@@ -845,6 +941,122 @@ def _paragraph_repetition_score(paragraph: str) -> float:
     return max(0.0, min(1.0, 1.0 - unique_ratio))
 
 
+def fast_ai_artifact_detection(text_block: str) -> Dict[str, object]:
+    """Triagem regex de alta performance com score cumulativo por evidência."""
+    cleaned = format_raw_text(text_block)
+    words = re.findall(r"\b\w+\b", cleaned, flags=REGEX_FAST_FLAGS)
+    word_count = max(1, len(words))
+
+    evidence: List[str] = []
+    matched_rules: List[Dict[str, object]] = []
+    category_counts = {
+        "critical_meta": 0,
+        "markdown_latex": 0,
+        "robotic_connectors": 0,
+        "stereotyped_vocab": 0,
+    }
+
+    heuristic_score = 0
+    critical_triggered = False
+    for rule in CRITICAL_META_RULES:
+        count = sum(1 for _ in rule.pattern.finditer(cleaned))
+        if count <= 0:
+            continue
+        critical_triggered = True
+        category_counts[rule.category] += count
+        matched_rules.append(
+            {
+                "rule": rule.name,
+                "category": rule.category,
+                "count": count,
+                "weight": rule.weight,
+                "score_delta": 100,
+            }
+        )
+        evidence.append(f"Gatilho crítico: {rule.name} ({count} ocorrência(s))")
+
+    if critical_triggered:
+        heuristic_score = 100
+
+    for rule in NON_VOCAB_WEIGHTED_HEURISTIC_RULES:
+        count = sum(1 for _ in rule.pattern.finditer(cleaned))
+        if count <= 0:
+            continue
+        category_counts[rule.category] += count
+        delta = rule.weight * count
+        if not critical_triggered:
+            heuristic_score += delta
+        matched_rules.append(
+            {
+                "rule": rule.name,
+                "category": rule.category,
+                "count": count,
+                "weight": rule.weight,
+                "score_delta": delta,
+            }
+        )
+        evidence.append(f"{rule.name} ({count} ocorrência(s), +{delta})")
+
+    vocab_matches_total = 0
+    vocab_pending: List[Tuple[HeuristicRule, int]] = []
+    for rule in STEREOTYPED_VOCAB_RULES:
+        count = sum(1 for _ in rule.pattern.finditer(cleaned))
+        if count <= 0:
+            continue
+        category_counts[rule.category] += count
+        vocab_matches_total += count
+        vocab_pending.append((rule, count))
+
+    vocab_context_signal = (
+        category_counts["markdown_latex"] > 0
+        or category_counts["robotic_connectors"] > 0
+    )
+    apply_vocab_score = vocab_context_signal or vocab_matches_total >= 2
+
+    for rule, count in vocab_pending:
+        delta = rule.weight * count
+        if apply_vocab_score and not critical_triggered:
+            heuristic_score += delta
+        matched_rules.append(
+            {
+                "rule": rule.name,
+                "category": rule.category,
+                "count": count,
+                "weight": rule.weight,
+                "score_delta": delta if apply_vocab_score else 0,
+                "cooccurrence_applied": apply_vocab_score,
+            }
+        )
+        if apply_vocab_score:
+            evidence.append(f"{rule.name} ({count} ocorrência(s), +{delta})")
+        else:
+            evidence.append(
+                f"{rule.name} ({count} ocorrência(s), ignorado por vocabulário isolado)"
+            )
+
+    heuristic_score = min(100, heuristic_score)
+    density_per_100_words = (sum(category_counts.values()) / word_count) * 100.0
+    is_suspicious = heuristic_score > 50
+
+    return {
+        "word_count": word_count,
+        "markdown_hits": category_counts["markdown_latex"],
+        "artificial_list_hits": 0,
+        "latex_hits": 0,
+        "connector_hits": category_counts["robotic_connectors"],
+        "total_hits": int(sum(category_counts.values())),
+        "density_per_100_words": round(density_per_100_words, 4),
+        "weighted_score": round(heuristic_score / 100.0, 4),
+        "heuristic_score": heuristic_score,
+        "critical_triggered": critical_triggered,
+        "category_counts": category_counts,
+        "is_suspicious": is_suspicious,
+        "reasons": evidence,
+        "evidence": evidence,
+        "matched_rules": matched_rules,
+    }
+
+
 def detect_ai_patterns(paragraphs: List[str]) -> Tuple[float, List[AIHit], Dict[str, float]]:
     hits: List[AIHit] = []
     full_text = "\n\n".join(paragraphs)
@@ -1046,6 +1258,7 @@ def _find_doi_quick(title: str, authors: str) -> str:
 async def _audit_reference_web_async(
     refs: List[Dict[str, object]],
     status_callback: StatusCallback = None,
+    progress_hook: Optional[Callable[[], None]] = None,
 ) -> List[Dict[str, object]]:
     """Dispara validacao web de referencias em paralelo via asyncio.gather."""
 
@@ -1086,24 +1299,47 @@ async def _audit_reference_web_async(
             "pipeline_status": "auditado_web",
         }
 
-    tasks = [_one(item) for item in refs]
-    return await asyncio.gather(*tasks) if tasks else []
+    async def _indexed(idx: int, item: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return idx, await _one(item)
+
+    tasks = [_indexed(idx, item) for idx, item in enumerate(refs)]
+    if not tasks:
+        return []
+
+    ordered: List[Optional[Dict[str, object]]] = [None] * len(tasks)
+    for done in asyncio.as_completed(tasks):
+        idx, row = await done
+        ordered[idx] = row
+        if progress_hook:
+            progress_hook()
+
+    return [row for row in ordered if row is not None]
 
 
 def _reference_sanity_check(
     web_rows: List[Dict[str, object]],
     status_callback: StatusCallback = None,
+    reference_progress_callback: ReferenceProgressCallback = None,
 ) -> List[Dict[str, object]]:
     """Qwen avalia todas as referências; limpa VRAM; Llama faz contra-parecer das não encontradas."""
     base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
     qwen_model = os.getenv("OLLAMA_SECONDARY_MODEL", "qwen2.5:latest")
     llama_model = os.getenv("OLLAMA_PRIMARY_MODEL", os.getenv("OLLAMA_MODEL", "llama3.1:8b"))
 
-    qwen_by_index: Dict[int, Dict[str, object]] = {}
+    final_rows: List[Dict[str, object]] = []
+    llama_targets = [row for row in web_rows if str(row.get("found_google", "Nao")) == "Nao"]
+    llama_done = 0
+
     for idx, row in enumerate(web_rows):
         reference = str(row.get("reference", ""))
+        found_google = str(row.get("found_google", "Nao"))
+        doi = str(row.get("doi", "Nao encontrado"))
+        exact_title_match = bool(row.get("exact_title_match", False))
+
+        if reference_progress_callback:
+            reference_progress_callback(idx + 1, len(web_rows), "qwen")
         if status_callback:
-            status_callback(f"🕵️ Desconfiando da perfeição gramatical... Referência {idx + 1}/{len(web_rows)}")
+            status_callback(f"🕵️ Auditando referência {idx + 1}/{len(web_rows)} com Qwen...")
 
         qwen_prompt = build_structured_prompt(
             instruction=(
@@ -1115,50 +1351,39 @@ def _reference_sanity_check(
             ),
             sections={"CITACAO": reference},
         )
-        qwen_by_index[idx] = _call_ollama_single(qwen_prompt, qwen_model, base_url)
+        qwen = _call_ollama_single(qwen_prompt, qwen_model, base_url)
+        gc.collect()
 
-    gc.collect()
+        llama: Dict[str, object] = {
+            "ok": True,
+            "veredito": "offline_plausivel",
+            "justificativa": "Obra localizada na web; contra-parecer Llama não necessário.",
+        }
+        if found_google != "Sim":
+            llama_done += 1
+            if reference_progress_callback:
+                reference_progress_callback(llama_done, max(1, len(llama_targets)), "llama")
+            if status_callback:
+                status_callback(f"Auditando obra individual {llama_done} com Llama...")
 
-    llama_by_index: Dict[int, Dict[str, object]] = {}
-    for idx, row in enumerate(web_rows):
-        if str(row.get("found_google", "Nao")) == "Sim":
-            continue
-        reference = str(row.get("reference", ""))
-        title = str(row.get("title", ""))
-        authors = str(row.get("authors", ""))
-        doi = str(row.get("doi", "Nao encontrado"))
+            title = str(row.get("title", ""))
+            authors = str(row.get("authors", ""))
 
-        llama_prompt = build_structured_prompt(
-            instruction=(
-                "A obra não foi localizada na web. Julgue se parece alucinação de IA ou documento offline legítimo. "
-                "Retorne APENAS JSON com as chaves: veredito, justificativa. "
-                "Veredito permitido: alucinacao, offline_plausivel, inconclusivo."
-            ),
-            sections={
-                "REFERENCIA": reference,
-                "TITULO": title,
-                "AUTORES": authors,
-                "DOI": doi,
-            },
-        )
-        llama_by_index[idx] = _call_ollama_single(llama_prompt, llama_model, base_url)
-
-    final_rows: List[Dict[str, object]] = []
-    for idx, row in enumerate(web_rows):
-        reference = str(row.get("reference", ""))
-        found_google = str(row.get("found_google", "Nao"))
-        doi = str(row.get("doi", "Nao encontrado"))
-        exact_title_match = bool(row.get("exact_title_match", False))
-
-        qwen = qwen_by_index.get(idx, {"ok": False, "veredito": "inconclusivo", "justificativa": ""})
-        llama = llama_by_index.get(
-            idx,
-            {
-                "ok": True,
-                "veredito": "offline_plausivel",
-                "justificativa": "Obra localizada na web; contra-parecer Llama não necessário.",
-            },
-        )
+            llama_prompt = build_structured_prompt(
+                instruction=(
+                    "A obra não foi localizada na web. Julgue se parece alucinação de IA ou documento offline legítimo. "
+                    "Retorne APENAS JSON com as chaves: veredito, justificativa. "
+                    "Veredito permitido: alucinacao, offline_plausivel, inconclusivo."
+                ),
+                sections={
+                    "REFERENCIA": reference,
+                    "TITULO": title,
+                    "AUTORES": authors,
+                    "DOI": doi,
+                },
+            )
+            llama = _call_ollama_single(llama_prompt, llama_model, base_url)
+            gc.collect()
 
         qwen_veredito = str(qwen.get("veredito", "")).lower()
         llama_veredito = str(llama.get("veredito", "")).lower()
@@ -1215,11 +1440,16 @@ async def async_verify_bibliography(
     return await asyncio.to_thread(_reference_sanity_check, web_rows, status_callback)
 
 
-def analyze_document(paragraphs: List[str], status_callback: StatusCallback = None) -> Dict[str, object]:
+def analyze_document(
+    paragraphs: List[str],
+    status_callback: StatusCallback = None,
+    enable_deep_ai: bool = False,
+) -> Dict[str, object]:
     """Executa pipeline de analise completa com retorno de dados para dashboards."""
     progress_callback: ProgressCallback = None
     model_progress_callback: ModelProgressCallback = None
     debug_callback: DebugCallback = None
+    reference_progress_callback: ReferenceProgressCallback = None
     if status_callback:
         status_callback("🔍 Extraindo e formatando texto do documento...")
 
@@ -1230,6 +1460,8 @@ def analyze_document(paragraphs: List[str], status_callback: StatusCallback = No
         model_progress_callback = getattr(status_callback, "model_progress_callback")
     if hasattr(status_callback, "debug_callback"):
         debug_callback = getattr(status_callback, "debug_callback")
+    if hasattr(status_callback, "reference_progress_callback"):
+        reference_progress_callback = getattr(status_callback, "reference_progress_callback")
 
     normalized_paragraphs: List[str] = []
     for paragraph in paragraphs:
@@ -1256,16 +1488,50 @@ def analyze_document(paragraphs: List[str], status_callback: StatusCallback = No
 
     web_audit_future: Optional[concurrent.futures.Future] = None
     audit_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+    reference_progress_state: Dict[str, int] = {
+        "web_done": 0,
+        "web_total": len(extracted_refs),
+    }
+
+    def _web_progress_hook() -> None:
+        reference_progress_state["web_done"] = int(reference_progress_state["web_done"]) + 1
+
     if extracted_refs:
         if status_callback:
             status_callback("🔎 Disparando auditoria assíncrona de referências em segundo plano...")
         audit_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         web_audit_future = audit_executor.submit(
-            lambda: asyncio.run(_audit_reference_web_async(extracted_refs, status_callback=None))
+            lambda: asyncio.run(
+                _audit_reference_web_async(
+                    extracted_refs,
+                    status_callback=None,
+                    progress_hook=_web_progress_hook,
+                )
+            )
         )
 
     if progress_callback:
         progress_callback(0.05)
+
+    fast_heuristic_future: Optional[concurrent.futures.Future] = None
+    fast_heuristic_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+    if status_callback:
+        status_callback("⚡ Iniciando triagem heurística rápida em paralelo com a busca web...")
+
+    def _run_fast_heuristics() -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+        rows: List[Dict[str, object]] = []
+        hits: List[Dict[str, object]] = []
+        for idx, paragraph in enumerate(paragraphs):
+            row = fast_ai_artifact_detection(paragraph)
+            normalized_row = {"paragraph_index": idx, **row}
+            rows.append(normalized_row)
+            if bool(row.get("is_suspicious", False)):
+                hits.append(normalized_row)
+        return rows, hits
+
+    fast_heuristic_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fast_heuristic_future = fast_heuristic_executor.submit(_run_fast_heuristics)
 
     plagiarism_percentage, plagiarism_hits, search_stats = detect_plagiarism(
         paragraphs,
@@ -1275,42 +1541,115 @@ def analyze_document(paragraphs: List[str], status_callback: StatusCallback = No
         ),
     )
 
+    fast_heuristic_rows: List[Dict[str, object]] = []
+    fast_heuristic_hits: List[Dict[str, object]] = []
+    if fast_heuristic_future:
+        try:
+            fast_heuristic_rows, fast_heuristic_hits = fast_heuristic_future.result(timeout=90)
+        except Exception:  # noqa: BLE001
+            fast_heuristic_rows, fast_heuristic_hits = _run_fast_heuristics()
+        finally:
+            if fast_heuristic_executor:
+                fast_heuristic_executor.shutdown(wait=False)
+
     if progress_callback:
         progress_callback(0.75)
 
-    if status_callback:
+    if status_callback and enable_deep_ai:
         status_callback("🤖 Preparando processamento em lote por modelo...")
 
-    _batch_plagiarism_llm_consensus(
-        paragraphs=paragraphs,
-        plagiarism_hits=plagiarism_hits,
-        status_callback=status_callback,
-        model_progress_callback=model_progress_callback,
-        debug_callback=debug_callback,
-    )
+    if enable_deep_ai:
+        _batch_plagiarism_llm_consensus(
+            paragraphs=paragraphs,
+            plagiarism_hits=plagiarism_hits,
+            status_callback=status_callback,
+            model_progress_callback=model_progress_callback,
+            debug_callback=debug_callback,
+        )
+    else:
+        for hit in plagiarism_hits:
+            hit.llm_consensus = {
+                "confidence": "Análise profunda desativada pelo usuário.",
+                "qwen": {"veredito": "desativado", "justificativa": "Modelo desativado"},
+                "llama": {"veredito": "desativado", "justificativa": "Modelo desativado"},
+            }
 
-    if status_callback:
+    if status_callback and enable_deep_ai:
         status_callback("🤖 Qwen -> Llama: calculando probabilidade de IA por bloco de secao...")
 
     ai_probability, ai_hits, ai_metrics = detect_ai_patterns(paragraphs)
-    ai_llm_scores = _llm_ai_probability_per_paragraph(
-        paragraphs,
-        status_callback=status_callback,
-        model_progress_callback=model_progress_callback,
-        debug_callback=debug_callback,
-    )
+    heuristic_ratio = len(fast_heuristic_hits) / max(1, len(paragraphs))
+    heuristic_ai_probability = min(100.0, heuristic_ratio * 100.0)
+
+    if enable_deep_ai:
+        ai_llm_scores = _llm_ai_probability_per_paragraph(
+            paragraphs,
+            status_callback=status_callback,
+            model_progress_callback=model_progress_callback,
+            debug_callback=debug_callback,
+        )
+    else:
+        ai_llm_scores = []
+        ai_probability = max(ai_probability, heuristic_ai_probability)
 
     if progress_callback:
         progress_callback(0.90)
 
     if status_callback:
-        status_callback("🧠 Consolidando auditoria de referências (web + Qwen + Llama)...")
+        if enable_deep_ai:
+            status_callback("🧠 Consolidando auditoria de referências (web + Qwen + Llama)...")
+        else:
+            status_callback("🧠 Consolidando auditoria de referências (somente busca web, IA profunda desativada)...")
 
     references: List[Dict[str, object]] = []
     if web_audit_future:
         try:
+            while not web_audit_future.done():
+                if reference_progress_callback and int(reference_progress_state["web_total"]) > 0:
+                    reference_progress_callback(
+                        int(reference_progress_state["web_done"]),
+                        int(reference_progress_state["web_total"]),
+                        "web",
+                    )
+                time.sleep(0.15)
+
             web_rows = web_audit_future.result(timeout=180)
-            references = _reference_sanity_check(web_rows, status_callback=status_callback)
+            if enable_deep_ai:
+                references = _reference_sanity_check(
+                    web_rows,
+                    status_callback=status_callback,
+                    reference_progress_callback=reference_progress_callback,
+                )
+            else:
+                references = []
+                for row in web_rows:
+                    found_google = str(row.get("found_google", "Nao"))
+                    doi = str(row.get("doi", "Nao encontrado"))
+                    exact_title_match = bool(row.get("exact_title_match", False))
+                    if found_google == "Sim" or doi != "Nao encontrado" or exact_title_match:
+                        status = "ok"
+                        veredito = "Referência Plausível (web)"
+                        confirmed = False
+                    else:
+                        status = "dubious"
+                        veredito = "Reference (Duvidosa)"
+                        confirmed = True
+
+                    references.append(
+                        {
+                            **row,
+                            "status": status,
+                            "veredito_final": veredito,
+                            "confirmed_hallucination": confirmed,
+                            "qwen_format": "Análise profunda desativada pelo usuário.",
+                            "llm_parecer": "Análise profunda desativada pelo usuário.",
+                            "llm_consensus": {
+                                "qwen": {"veredito": "desativado"},
+                                "llama": {"veredito": "desativado"},
+                            },
+                            "pipeline_status": "concluido_web",
+                        }
+                    )
         except Exception:  # noqa: BLE001
             references = []
         finally:
@@ -1345,6 +1684,8 @@ def analyze_document(paragraphs: List[str], status_callback: StatusCallback = No
         labels_by_paragraph.setdefault(hit.paragraph_index, []).append("plagiarism")
     for hit in ai_hits:
         labels_by_paragraph.setdefault(hit.paragraph_index, []).append("ai")
+    for row in fast_heuristic_hits:
+        labels_by_paragraph.setdefault(int(row["paragraph_index"]), []).append("formatting_alert")
     for ref in references:
         if ref.get("status") == "dubious":
             labels_by_paragraph.setdefault(int(ref["paragraph_index"]), []).append("reference")
@@ -1374,9 +1715,13 @@ def analyze_document(paragraphs: List[str], status_callback: StatusCallback = No
     return {
         "plagiarism_percentage": plagiarism_percentage,
         "ai_probability": ai_probability,
+        "heuristic_ai_probability": heuristic_ai_probability,
+        "deep_ai_enabled": enable_deep_ai,
         "ai_metrics": ai_metrics,
         "human_baseline": HUMAN_BASELINE,
         "ai_llm_scores": ai_llm_scores,
+        "fast_heuristic_rows": fast_heuristic_rows,
+        "fast_heuristic_hits": fast_heuristic_hits,
         "synthetic_perfection_scores": synthetic_rows,
         "plagiarism_hits": [
             {

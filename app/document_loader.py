@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 import fitz  # PyMuPDF
 from docx import Document
 
+from reference_handler import split_abnt_references
 from text_formatter import format_raw_text
 
 
@@ -43,6 +44,50 @@ def clean_text_preserve_paragraphs(paragraphs: List[str]) -> List[str]:
         if txt:
             cleaned.append(txt)
     return cleaned
+
+
+def _is_reference_header_line(text: str) -> bool:
+    return bool(
+        re.match(
+            r"^(?:\d+\.?\s*)?(REFER[ÊE]NCIAS|BIBLIOGRAFIA|REFERENCES)(?:\s+BIBLIOGR[ÁA]FICAS)?\s*:?$",
+            text.strip(),
+            flags=re.IGNORECASE | re.UNICODE,
+        )
+    )
+
+
+def smart_split_references(text_block: str) -> List[str]:
+    """Wrapper local para manter compatibilidade, delegando ao separador ABNT dedicado."""
+    return split_abnt_references(format_raw_text(text_block))
+
+
+def _apply_reference_split(paragraphs: List[str]) -> List[str]:
+    """Após detectar seção de referências, preserva itemização por obra para evitar aglutinação."""
+    if not paragraphs:
+        return paragraphs
+
+    start = -1
+    for idx, paragraph in enumerate(paragraphs):
+        if _is_reference_header_line(paragraph):
+            start = idx + 1
+            break
+
+    if start < 0:
+        return paragraphs
+
+    updated: List[str] = []
+    updated.extend(paragraphs[:start])
+
+    for paragraph in paragraphs[start:]:
+        if not paragraph.strip():
+            continue
+        split_items = smart_split_references(paragraph)
+        if split_items:
+            updated.extend(split_items)
+        else:
+            updated.append(paragraph)
+
+    return updated
 
 
 def _read_pdf(file_bytes: bytes) -> List[str]:
@@ -84,6 +129,7 @@ def load_document(file_name: str, file_bytes: bytes) -> Tuple[List[str], str]:
         raise ValueError("Formato nao suportado. Use PDF, DOCX ou TXT.")
 
     cleaned = clean_text_preserve_paragraphs(paragraphs)
+    cleaned = _apply_reference_split(cleaned)
     unified = "\n\n".join(cleaned)
     return cleaned, unified
 
@@ -124,7 +170,12 @@ def extract_reference_candidates(paragraphs: List[str]) -> List[Dict[str, object
             ref_text = paragraphs[idx].strip()
             if not ref_text:
                 continue
-            refs.append({"paragraph_index": idx, "reference": ref_text})
+            split_refs = split_abnt_references(ref_text)
+            if split_refs:
+                for ref in split_refs:
+                    refs.append({"paragraph_index": idx, "reference": ref})
+            else:
+                refs.append({"paragraph_index": idx, "reference": ref_text})
         return refs
 
     trailing_refs: List[Dict[str, object]] = []
@@ -135,7 +186,12 @@ def extract_reference_candidates(paragraphs: List[str]) -> List[Dict[str, object
                 break
             continue
         if _looks_like_abnt_reference(paragraph):
-            trailing_refs.append({"paragraph_index": idx, "reference": paragraph})
+            split_refs = split_abnt_references(paragraph)
+            if split_refs:
+                for ref in reversed(split_refs):
+                    trailing_refs.append({"paragraph_index": idx, "reference": ref})
+            else:
+                trailing_refs.append({"paragraph_index": idx, "reference": paragraph})
         elif trailing_refs:
             break
 
