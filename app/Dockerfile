@@ -2,6 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+	PYTHONUNBUFFERED=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	chromium \
 	chromium-driver \
@@ -41,13 +44,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENV STREAMLIT_SERVER_HEADLESS=true
-ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
-ENV STREAMLIT_SERVER_PORT=8501
-ENV OLLAMA_BASE_URL=http://ollama:11434
-ENV OLLAMA_MODEL=llama3.1:8b
-ENV CHROME_BIN=/usr/bin/chromium
-ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
+ENV STREAMLIT_SERVER_HEADLESS=true \
+	STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
+	STREAMLIT_SERVER_PORT=8501 \
+	OLLAMA_BASE_URL=http://ollama:11434 \
+	OLLAMA_PRIMARY_MODEL=llama3.1:8b \
+	OLLAMA_SECONDARY_MODEL=qwen2.5:latest \
+	SEARCH_API_PROVIDER=searxng \
+	SEARCH_SEARXNG_URL=http://searxng:8080 \
+	CHROME_BIN=/usr/bin/chromium \
+	CHROMEDRIVER_PATH=/usr/bin/chromedriver
 
 EXPOSE 8501
 
